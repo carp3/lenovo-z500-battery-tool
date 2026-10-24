@@ -1,0 +1,102 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag to publish (for example v0.1.1)'
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify public-build calibration setting
+        shell: pwsh
+        run: |
+          $flag = Get-Content src/BuildOptions.cs -Raw
+          if ($flag -notmatch 'EnableExperimentalCalibration\s*=\s*false\s*;') {
+            throw 'Official builds must leave experimental calibration disabled.'
+          }
+
+      - name: Compile and check without hardware access
+        shell: pwsh
+        run: ./build.ps1 -Test
+
+      - name: Choose release tag
+        id: release
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          $tag = ''
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $tag = $env:REQUESTED_TAG
+          } elseif ($env:REF_TYPE -eq 'tag') {
+            $tag = $env:REF_NAME
+          } elseif ($env:EVENT_NAME -eq 'push' -and $env:REF_NAME -eq 'main') {
+            # Bootstrap the first prerelease only. Later main pushes just validate.
+            $existing = @(git tag --list 'v*')
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect tags.' }
+            if ($existing.Count -eq 0) { $tag = 'v0.1.0' }
+          }
+          if ($tag) {
+            if ($tag -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
+              throw 'Expected a semantic-version tag such as v0.1.0.'
+            }
+            "tag=$tag" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Package executable and checksums
+        if: steps.release.outputs.tag != ''
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: ./package.ps1 -Version $env:RELEASE_TAG
+
+      - name: Save build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-build
+          path: |
+            build/Z500Battery.exe
+            build/ui-*.png
+          retention-days: 14
+
+      - name: Publish experimental GitHub prerelease
+        if: steps.release.outputs.tag != '' && github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          $zip = "dist/lenovo-z500-battery-tool-$env:RELEASE_TAG-windows-x64.zip"
+          gh release create $env:RELEASE_TAG $zip dist/SHA256SUMS.txt `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:GITHUB_SHA `
+            --title "Z500 Battery Tool $env:RELEASE_TAG (experimental)" `
+            --notes-file RELEASE_NOTES.md --prerelease
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }

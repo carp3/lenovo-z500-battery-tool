@@ -1,0 +1,4 @@
+BasedOnStyle: Microsoft
+Language: CSharp
+ColumnLimit: 110
+IndentWidth: 4

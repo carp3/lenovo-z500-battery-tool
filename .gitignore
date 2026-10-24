@@ -1,0 +1,14 @@
+/build/
+/dist/
+/tools/
+*.exe
+*.dll
+*.pdb
+*.zip
+*.csv
+*.log
+snapshot-*.json
+live-probe*.json
+*-error.txt
+ui-check*.txt
+self-test.txt
